@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FulfillFlow – Fulfillment Control Tower</title>
+<style>
+:root{--bg:#f3f5f7;--card:#fff;--ink:#1b2430;--mut:#667385;--line:#dde3ea;--navy:#14304f;--blue:#1f6feb;--red:#c62828;--amb:#b26a00;--grn:#1b7f3b}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--navy);color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+header h1{font-size:18px;margin:0}
+.demo{background:#fff7e0;border-bottom:1px solid #ecd9a0;padding:6px 20px;font-size:13px;color:#6b5200}
+nav{display:flex;gap:4px;padding:10px 20px 0;flex-wrap:wrap}
+nav button{border:0;background:none;padding:9px 14px;font:inherit;cursor:pointer;border-bottom:3px solid transparent;color:var(--mut)}
+nav button.on{color:var(--navy);border-color:var(--blue);font-weight:600}
+main{padding:16px 20px;max-width:1100px;margin:auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+.card,.box{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}
+.card b{display:block;font-size:28px}
+.card span{color:var(--mut);font-size:13px}
+.box{margin-bottom:16px;overflow-x:auto}
+h2{font-size:16px;margin:0 0 10px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:13px}
+tr.click{cursor:pointer}tr.click:hover{background:#f6f9fd}
+.badge{display:inline-block;padding:2px 9px;border-radius:12px;font-size:12px;font-weight:600;background:#e8edf3;color:#34475c;white-space:nowrap}
+.b-Shipped{background:#dff3e5;color:var(--grn)}.b-Staged,.b-Handed{background:#e3ecfd;color:#1c4fb0}
+.pri{background:#fde4e4;color:var(--red)}.warn{background:#fff0d6;color:var(--amb)}.bad{background:#fde4e4;color:var(--red)}.good{background:#dff3e5;color:var(--grn)}
+button.act,button.sm{font:inherit;border:0;border-radius:6px;background:var(--blue);color:#fff;padding:9px 16px;cursor:pointer}
+button.sm{padding:4px 10px;font-size:13px}
+button.sec{background:#e8edf3;color:var(--ink)}
+input,select{font:inherit;padding:8px;border:1px solid #c5ced9;border-radius:6px;max-width:100%}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+.msg{padding:10px 14px;border-radius:6px;margin-bottom:12px}
+.msg.ok{background:#dff3e5;color:var(--grn)}.msg.no{background:#fde4e4;color:var(--red)}
+.empty{color:var(--mut);padding:10px 0}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-bottom:10px}
+dialog{border:0;border-radius:10px;max-width:560px;width:94%;padding:20px}
+dialog::backdrop{background:#0006}
+.row{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px dashed var(--line)}
+.steps{display:flex;gap:3px;margin:10px 0}
+.steps i{flex:1;height:6px;border-radius:3px;background:#dde3ea}.steps i.d{background:var(--blue)}
+small{color:var(--mut)}
+</style>
+</head>
+<body>
+<header><h1>FulfillFlow · Fulfillment Control Tower</h1><button class="act sec" onclick="reset()">Reset demo data</button></header>
+<div class="demo">Demo with fake data: 10 detailed sample orders. XYZ's real volume is about 200–300 orders a day. No real couriers are contacted.</div>
+<nav id="nav"></nav>
+<main id="app"></main>
+<dialog id="dlg"></dialog>
+
+<script>
+// ---------- RULES & CONSTANTS (all business rules live here) ----------
+const ST = ['Received','Processed','Picked','Packed','Staged','Handed over','Shipped'];
+const NEED = [240,180,100,50,15,5,0];            // assumed minutes still needed from each status until courier handover
+const COUR = [{n:'EcoPost',cost:45,pick:600},{n:'QuickShip',cost:70,pick:240},{n:'ExpressNow',cost:120,pick:60}]; // pick = minutes until next pickup
+const BAYS = ['Bay A1','Bay A2','Bay B1','Bay B2'];
+const ACTION = ['Process order & assign courier','Confirm items picked','Pack parcel','Stage parcel','Confirm courier handover','Mark as shipped'];
+const KEY = 'fulfillflow-v1';
+
+const minsLeft = o => (o.dl - Date.now()) / 6e4;
+// Rule: overdue = deadline passed. At risk = minutes left < minutes the remaining steps normally need.
+function risk(o){
+  if (o.st === 6) return 'done';
+  const m = minsLeft(o);
+  if (m < 0) return 'overdue';
+  return m < NEED[o.st] ? 'risk' : 'ok';
+}
+const eligible = (o,c) => c.pick < minsLeft(o);   // Rule: courier must collect before the deadline
+const stk = sku => S.stock.find(s => s.sku === sku);
+
+// ---------- SAMPLE DATA ----------
+const at = m => Date.now() + m * 6e4;
+function seed(){
+  const stock = [
+    ['TSH-BLK-M','T-shirt Black M','A1-03',40,40,20],
+    ['TSH-BLK-L','T-shirt Black L','A1-04',25,25,0],
+    ['TSH-WHT-M','T-shirt White M','A1-05',12,5,30],   // discrepancy: 7 missing
+    ['MUG-BLU','Mug Blue','B2-01',60,60,0],
+    ['MUG-RED','Mug Red','B2-02',8,0,40],             // recorded 8 but none found
+    ['CAP-NVY','Cap Navy','C1-01',30,30,0],
+    ['BAG-GRN','Tote Bag Green','C2-02',3,3,0]
+  ].map(a => ({sku:a[0],name:a[1],loc:a[2],rec:a[3],ver:a[4],sec:a[5]}));
+  const o = (id,pri,sku,qty,st,dl,courier,bay) => ({id,pri,sku,qty,st,dl:at(dl),courier:courier||'',bay:bay||''});
+  return {
+    stock, tr:[], nextEx:4, nextTr:1,
+    orders:[
+      o(1001,1,'TSH-BLK-M',2,1,90),
+      o(1002,1,'MUG-RED',2,1,300),
+      o(1003,0,'CAP-NVY',1,0,1500),
+      o(1004,1,'TSH-WHT-M',3,2,200,'QuickShip'),
+      o(1005,0,'MUG-BLU',4,3,600,'EcoPost'),
+      o(1006,1,'TSH-BLK-L',1,4,120,'ExpressNow','Bay B2'),
+      o(1007,0,'BAG-GRN',1,5,200,'QuickShip','Bay A1'),
+      o(1008,1,'CAP-NVY',2,1,-30),
+      o(1009,0,'TSH-BLK-L',1,6,-300,'EcoPost','Bay A2'),
+      o(1010,0,'MUG-BLU',1,4,400,'QuickShip','Bay B1')
+    ],
+    ex:[
+      {id:1,ref:'MUG-RED',type:'Missing stock',desc:'Recorded 8 but shelf B2-02 is empty.',owner:'Picker 1',next:'Recount B2-02 and check secondary warehouse',open:1},
+      {id:2,ref:'1010',type:'Missed courier pickup',desc:'QuickShip did not collect from Bay B1.',owner:'Office',next:'Call courier and rebook pickup',open:1},
+      {id:3,ref:'1004',type:'Wrong variant',desc:'Picker took White L instead of White M.',owner:'Picker 2',next:'Return item, re-pick White M',open:1}
+    ]
+  };
+}
+
+// ---------- STATE ----------
+let S, tab = 'dash', f = {q:'',st:'',pri:false}, openId = null, msg = null, prefill = '';
+try { S = JSON.parse(localStorage.getItem(KEY)); } catch(e){}
+if (!S) S = seed();
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} };
+const say = (t,ok) => { msg = {t,ok}; };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function reset(){ if(confirm('Restore the original demo data?')){ S = seed(); save(); say('Demo data restored.',1); render(); } }
+
+// ---------- ACTIONS ----------
+function step(id){
+  const o = S.orders.find(x => x.id === id), s = stk(o.sku), val = i => document.getElementById(i)?.value;
+  const no = t => { say(t,0); render(); };
+  if (o.st === 0){
+    const c = COUR.find(x => x.n === val('cs'));
+    if (!eligible(o,c)) return no(`${c.n} collects in ${c.pick} min, after this order's deadline. Pick another courier.`);
+    o.courier = c.n;
+  } else if (o.st === 1){
+    if (s.ver < o.qty) return no(`Cannot pick: only ${s.ver} verified in the main warehouse, order needs ${o.qty}. Request a transfer or log an exception.`);
+    s.ver -= o.qty; s.rec -= o.qty;
+  } else if (o.st === 2){
+    if (val('ps') !== o.sku) return no(`Packing blocked: you scanned ${val('ps')} but the order needs ${o.sku}. Put it back and pick the right variant.`);
+  } else if (o.st === 3){
+    if (!val('bs')) return no('Choose a staging location first.');
+    o.bay = val('bs');
+  }
+  o.st++; say(`Order ${o.id} is now "${ST[o.st]}".`,1); save(); render();
+}
+function addEx(){
+  const g = i => document.getElementById(i).value.trim();
+  if (!g('xr') || !g('xd') || !g('xn')) { say('Fill in the order/SKU, description and next action.',0); return render(); }
+  S.ex.push({id:S.nextEx++,ref:g('xr'),type:g('xt'),desc:g('xd'),owner:g('xo'),next:g('xn'),open:1});
+  prefill = ''; say('Exception logged. It stays on the dashboard until resolved.',1); save(); render();
+}
+const resolveEx = id => { S.ex.find(e => e.id === id).open = 0; say('Exception resolved.',1); save(); render(); };
+function newTransfer(){
+  const sku = document.getElementById('ts').value, q = +document.getElementById('tq').value, s = stk(sku);
+  if (!(q > 0) || q > s.sec) { say(`Enter a quantity between 1 and ${s.sec} (secondary stock).`,0); return render(); }
+  S.tr.push({id:S.nextTr++,sku,qty:q,st:0}); say('Transfer requested. Main stock is unchanged.',1); save(); render();
+}
+function moveTr(id){
+  const t = S.tr.find(x => x.id === id), s = stk(t.sku);
+  if (t.st === 0){ s.sec -= t.qty; t.st = 1; say('Marked in transit. Main stock is still unchanged until received.',1); }
+  else {
+    const n = parseInt(prompt(`Count the units that actually arrived (sent ${t.qty}):`, t.qty));
+    if (isNaN(n) || n < 0) return;
+    s.ver += n; s.rec += n; t.st = 2; t.got = n; say(`Received and verified ${n} units. Main stock updated.`,1);
+  }
+  save(); render();
+}
+function verify(sku){
+  const s = stk(sku), n = parseInt(prompt(`Count ${s.name} on shelf ${s.loc}:`, s.ver));
+  if (isNaN(n) || n < 0) return;
+  s.ver = s.rec = n; say(`${s.name} counted: ${n}. Recorded stock corrected.`,1); save(); render();
+}
+const reportFor = id => { prefill = String(id); openId = null; tab = 'ex'; render(); };
+
+// ---------- VIEW HELPERS ----------
+const badge = o => `<span class="badge b-${ST[o.st].split(' ')[0]}">${ST[o.st]}</span>`;
+function dlText(o){
+  if (o.st === 6) return 'Shipped';
+  const m = Math.round(minsLeft(o)), a = Math.abs(m), t = a >= 60 ? `${Math.floor(a/60)}h ${a%60}m` : `${a}m`;
+  return m < 0 ? `<b style="color:var(--red)">Overdue by ${t}</b>` : `in ${t}`;
+}
+const riskBadge = o => ({overdue:'<span class="badge bad">Overdue</span>',risk:'<span class="badge warn">At risk</span>'}[risk(o)] || '');
+const priBadge = o => o.pri ? '<span class="badge pri">Priority</span>' : '';
+const openEx = ref => S.ex.filter(e => e.open && (!ref || e.ref === String(ref) || e.ref === ref));
+const stockFlag = s => s.ver === 0 ? '<span class="badge bad">Not found</span>' : s.ver < s.rec ? '<span class="badge warn">Needs verification</span>' : s.ver < 5 ? '<span class="badge warn">Low</span>' : '<span class="badge good">OK</span>';
+
+function orderRows(list){
+  if (!list.length) return '<div class="empty">No orders match.</div>';
+  return `<table><tr><th>Order</th><th>Item</th><th>Status</th><th>Deadline</th><th>Courier / location</th></tr>` +
+    list.map(o => `<tr class="click" onclick="openId=${o.id};render()"><td>#${o.id} ${priBadge(o)} ${riskBadge(o)}</td>
+    <td>${esc(stk(o.sku).name)} ×${o.qty}<br><small>${o.sku}</small></td><td>${badge(o)}</td><td>${dlText(o)}</td>
+    <td>${o.courier||'–'}${o.bay?'<br><small>'+o.bay+'</small>':''}</td></tr>`).join('') + '</table>';
+}
+
+// ---------- SCREENS ----------
+function dashboard(){
+  const live = S.orders.filter(o => o.st < 6);
+  const att = live.filter(o => ['overdue','risk'].includes(risk(o)))
+    .sort((a,b) => (risk(a)==='overdue'?0:1) - (risk(b)==='overdue'?0:1) || a.dl - b.dl);
+  const staged = live.filter(o => o.st === 4);
+  const counts = ST.map((s,i) => `<span class="badge" style="margin:2px">${s}: ${S.orders.filter(o => o.st === i).length}</span>`).join('');
+  return `<div class="cards">
+    <div class="card"><b>${S.orders.length}</b><span>Sample orders in this demo</span></div>
+    <div class="card"><b>${live.filter(o => o.pri).length}</b><span>Priority orders still open</span></div>
+    <div class="card"><b style="color:var(--amb)">${att.length}</b><span>Overdue or at risk</span></div>
+    <div class="card"><b style="color:var(--red)">${openEx().length}</b><span>Open exceptions</span></div></div>
+    <div class="box"><h2>Needs attention now</h2><small>At risk = time left to the deadline is less than the time the remaining steps normally need (assumed: Received 240 min, Processed 180, Picked 100, Packed 50, Staged 15, Handed over 5).</small>${orderRows(att)}</div>
+    <div class="box"><h2>Staged, waiting for courier</h2>${staged.length ? orderRows(staged) : '<div class="empty">No parcels waiting for pickup.</div>'}</div>
+    <div class="box"><h2>Open exceptions</h2>${exTable(openEx(), true)}</div>
+    <div class="box"><h2>Orders by status</h2>${counts}</div>`;
+}
+function orders(){
+  return `<div class="bar"><input id="fq" placeholder="Search order, item or SKU" value="${esc(f.q)}" oninput="f.q=this.value;drawList()">
+    <select onchange="f.st=this.value;drawList()"><option value="">All statuses</option>${ST.map((s,i) => `<option value="${i}" ${f.st===String(i)?'selected':''}>${s}</option>`).join('')}</select>
+    <label><input type="checkbox" ${f.pri?'checked':''} onchange="f.pri=this.checked;drawList()"> Priority only</label></div>
+    <div class="box" id="ol"></div>`;
+}
+function drawList(){
+  const q = f.q.toLowerCase();
+  const list = S.orders.filter(o => (!f.st || o.st === +f.st) && (!f.pri || o.pri) &&
+    (`${o.id} ${o.sku} ${stk(o.sku).name}`).toLowerCase().includes(q)).sort((a,b) => a.dl - b.dl);
+  document.getElementById('ol').innerHTML = orderRows(list);
+}
+function inventory(){
+  return `<div class="box"><h2>Stock: recorded vs physically verified</h2><small>Only verified main-warehouse stock can be picked. "Recorded" is what the spreadsheet says.</small>
+  <table><tr><th>SKU</th><th>Item</th><th>Shelf</th><th>Recorded</th><th>Verified</th><th>Secondary wh.</th><th>Flag</th><th></th></tr>` +
+  S.stock.map(s => `<tr><td>${s.sku}</td><td>${esc(s.name)}</td><td>${s.loc}</td><td>${s.rec}</td><td><b>${s.ver}</b></td><td>${s.sec}</td><td>${stockFlag(s)}</td>
+  <td><button class="sm sec" onclick="verify('${s.sku}')">Count shelf</button></td></tr>`).join('') + '</table></div>';
+}
+function transfers(){
+  const stateName = ['Requested','In transit','Received'];
+  return `<div class="box"><h2>Request a transfer from the secondary warehouse</h2>
+    <div class="bar"><select id="ts">${S.stock.filter(s => s.sec > 0).map(s => `<option value="${s.sku}">${esc(s.name)} (${s.sec} in secondary)</option>`).join('')}</select>
+    <input id="tq" type="number" min="1" placeholder="Quantity" style="width:110px"><button class="act" onclick="newTransfer()">Request transfer</button></div>
+    <small>Main-warehouse stock only increases when the delivery is received and counted.</small></div>
+    <div class="box"><h2>Transfers</h2>${S.tr.length ? `<table><tr><th>#</th><th>Item</th><th>Qty</th><th>State</th><th></th></tr>` +
+    S.tr.map(t => `<tr><td>${t.id}</td><td>${esc(stk(t.sku).name)}</td><td>${t.qty}${t.got!==undefined?' (received '+t.got+')':''}</td><td><span class="badge ${t.st===2?'good':'warn'}">${stateName[t.st]}</span></td>
+    <td>${t.st<2 ? `<button class="sm" onclick="moveTr(${t.id})">${t.st===0?'Mark in transit':'Receive & verify'}</button>` : ''}</td></tr>`).join('') + '</table>' : '<div class="empty">No transfers yet. Request one above, for example Mug Red for order #1002.</div>'}</div>`;
+}
+function exTable(list, compact){
+  if (!list.length) return '<div class="empty">No exceptions here. Everything is resolved.</div>';
+  return `<table><tr><th>Order / SKU</th><th>Issue</th><th>Owner</th><th>Next action</th><th>Status</th>${compact?'':'<th></th>'}</tr>` +
+    list.map(e => `<tr><td>${esc(e.ref)}</td><td><b>${e.type}</b><br>${esc(e.desc)}</td><td>${e.owner}</td><td>${esc(e.next)}</td>
+    <td><span class="badge ${e.open?'bad':'good'}">${e.open?'Open':'Resolved'}</span></td>
+    ${compact?'':`<td>${e.open?`<button class="sm" onclick="resolveEx(${e.id})">Resolve</button>`:''}</td>`}</tr>`).join('') + '</table>';
+}
+function exceptions(){
+  const opts = a => a.map(x => `<option>${x}</option>`).join('');
+  return `<div class="box"><h2>Log an exception</h2><div class="form">
+    <input id="xr" placeholder="Order # or SKU" value="${esc(prefill)}">
+    <select id="xt">${opts(['Missing stock','Wrong variant','Misplaced parcel','Missed courier pickup','Other'])}</select>
+    <select id="xo">${opts(['Office','Picker 1','Picker 2','Picker 3'])}</select>
+    <input id="xd" placeholder="What happened?"><input id="xn" placeholder="Next action"></div>
+    <button class="act" onclick="addEx()">Log exception</button></div>
+    <div class="box"><h2>Open</h2>${exTable(S.ex.filter(e => e.open))}</div>
+    <div class="box"><h2>Resolved</h2>${exTable(S.ex.filter(e => !e.open))}</div>`;
+}
+
+// ---------- ORDER DETAIL (shows only the next action) ----------
+function detail(o){
+  const s = stk(o.sku), r = risk(o);
+  let ctl = '';
+  if (o.st === 0) ctl = `<select id="cs">${COUR.map(c => `<option value="${c.n}" ${eligible(o,c)?'':'disabled'}>${c.n} · ₹${c.cost} · pickup in ${c.pick} min${eligible(o,c)?'':' (too late)'}</option>`).join('')}</select>
+    <small>Cheapest courier that still collects before the deadline: <b>${(COUR.filter(c => eligible(o,c)).sort((a,b) => a.cost-b.cost)[0]||{n:'none'}).n}</b></small>`;
+  if (o.st === 2) ctl = `<label>Item you picked:</label><select id="ps">${S.stock.map(x => `<option value="${x.sku}">${x.sku} – ${esc(x.name)}</option>`).join('')}</select>`;
+  if (o.st === 3) ctl = `<select id="bs"><option value="">Choose staging location…</option>${BAYS.map(b => `<option>${b}</option>`).join('')}</select>`;
+  const ex = openEx(o.id);
+  return `<h2>Order #${o.id} ${priBadge(o)} ${riskBadge(o)}</h2>
+   <div class="steps">${ST.map((_,i) => `<i class="${i <= o.st ? 'd' : ''}"></i>`).join('')}</div>
+   <div class="row"><span>Status</span>${badge(o)}</div>
+   <div class="row"><span>Item</span><span>${esc(s.name)} ×${o.qty} (${o.sku})</span></div>
+   <div class="row"><span>Deadline</span><span>${new Date(o.dl).toLocaleString([], {hour:'2-digit',minute:'2-digit',day:'numeric',month:'short'})} · ${dlText(o)}</span></div>
+   <div class="row"><span>Courier</span><span>${o.courier||'Not assigned'} <small>(simulated)</small></span></div>
+   <div class="row"><span>Staging location</span><span>${o.bay||'–'}</span></div>
+   <div class="row"><span>Main stock verified / recorded</span><span>${s.ver} / ${s.rec}</span></div>
+   ${r==='risk'||r==='overdue' ? `<div class="msg no" style="margin-top:10px">${r==='overdue'?'Deadline has passed.':`At risk: ${Math.round(minsLeft(o))} min left, remaining steps need about ${NEED[o.st]} min.`}</div>` : ''}
+   ${ex.length ? `<div class="msg no" style="margin-top:10px"><b>Open exceptions:</b> ${ex.map(e => esc(e.type)+' – '+esc(e.next)).join('; ')}</div>` : ''}
+   ${msg ? `<div class="msg ${msg.ok?'ok':'no'}" style="margin-top:10px">${esc(msg.t)}</div>` : ''}
+   <div class="bar" style="margin-top:14px">${ctl}
+   ${o.st < 6 ? `<button class="act" onclick="step(${o.id})">${ACTION[o.st]}</button>` : '<span class="badge good">Complete</span>'}
+   <button class="act sec" onclick="reportFor(${o.id})">Report a problem</button>
+   <button class="act sec" onclick="openId=null;render()">Close</button></div>`;
+}
+
+// ---------- RENDER ----------
+const TABS = [['dash','Dashboard'],['ord','Orders'],['inv','Inventory'],['tr','Transfers'],['ex','Exceptions']];
+function render(){
+  document.getElementById('nav').innerHTML = TABS.map(t => `<button class="${tab===t[0]?'on':''}" onclick="tab='${t[0]}';msg=null;render()">${t[1]}${t[0]==='ex'&&openEx().length?' ('+openEx().length+')':''}</button>`).join('');
+  const banner = msg && openId === null ? `<div class="msg ${msg.ok?'ok':'no'}">${esc(msg.t)}</div>` : '';
+  document.getElementById('app').innerHTML = banner + ({dash:dashboard,ord:orders,inv:inventory,tr:transfers,ex:exceptions}[tab])();
+  if (tab === 'ord') drawList();
+  const d = document.getElementById('dlg');
+  if (openId !== null){ d.innerHTML = detail(S.orders.find(o => o.id === openId)); if (!d.open) d.showModal(); }
+  else if (d.open) d.close();
+}
+document.getElementById('dlg').addEventListener('cancel', () => { openId = null; });
+setInterval(() => { if (openId === null && tab === 'dash') render(); }, 60000); // refresh risk every minute
+render();
+</script>
+</body>
+</html>
